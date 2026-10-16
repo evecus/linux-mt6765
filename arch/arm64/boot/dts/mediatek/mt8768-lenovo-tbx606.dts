@@ -334,3 +334,18 @@
 		};
 	};
 };
+
+/* MTK top-RGU watchdog. Without it a panic simply hangs forever (no reboot),
+ * so pstore never gets a chance to be read on the next boot. With the WDT
+ * enabled the board reboots on its own and the ramoops record survives.
+ * Address/IRQ from the vendor DTB (toprgu@10007000, SPI 139); note the
+ * vendor compatible is "mediatek,mt6765-toprgu" while the mainline driver
+ * matches on "mediatek,mt6765-wdt". */
+&soc {
+	watchdog@10007000 {
+		compatible = "mediatek,mt6765-wdt";
+		reg = <0 0x10007000 0 0x1000>;
+		interrupts = <GIC_SPI 139 IRQ_TYPE_LEVEL_HIGH>;
+		status = "okay";
+	};
+};
