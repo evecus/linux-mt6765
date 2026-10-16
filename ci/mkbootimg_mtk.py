@@ -82,7 +82,30 @@ def main():
     struct.pack_into('<I', hdr, 1652, TAGS_ADDR)      # MTK: tags_addr again
     struct.pack_into('<I', hdr, 1656, 0)
 
-    out = bytes(hdr) + pad(kernel_blob, page) + pad(ramdisk, page)
+    # The stock image carries the DTB twice:
+    #   1. bare FDT appended to the kernel image (that is what the kernel
+    #      itself decompresses against), and
+    #   2. after the ramdisk, a mkdtboimg-style "Android DTB" blob: a 64-byte
+    #      header (magic 0xd7b7ab1e, big-endian) followed by the same DTB.
+    #      LK reads *this* copy -- the size in the MTK private header field
+    #      @1648 is its total size (64 + dtb_size). Shipping only the bare
+    #      copy is why LK failed to find a DTB and dropped into download mode.
+    adtb = bytearray(64)
+    struct.pack_into('>8I', adtb, 0,
+                     0xd7b7ab1e,          # magic
+                     len(dtb) + 64,       # total size
+                     0x20,                # header size
+                     0x20,                # entry size
+                     1,                   # number of entries
+                     0x20,                # offset to entry table
+                     page,                # page size
+                     0)                   # version
+    struct.pack_into('>4I', adtb, 32,
+                     len(dtb),            # entry0: dtb size
+                     0x40,                # entry0: dtb offset
+                     0, 0)                # device id, revision (+16 reserved)
+
+    out = bytes(hdr) + pad(kernel_blob, page) + pad(ramdisk, page) + bytes(adtb) + dtb
     with open(a.output, 'wb') as f:
         f.write(out)
     print(f"[pack] {a.output}: {len(out)} bytes "
