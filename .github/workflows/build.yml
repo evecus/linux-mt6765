@@ -93,11 +93,19 @@ jobs:
             initramfs.cpio.gz
 
   rootfs:
-    name: Debian rootfs for SD card
+    name: Debian rootfs image (userdata / eMMC)
     runs-on: ubuntu-24.04
     needs: kernel
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install image tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs android-sdk-libsparse-utils
+          mke2fs -V 2>&1 | head -1
+          img2simg -v 2>&1 | head -1 || true
 
       - name: Download kernel modules artifact
         uses: actions/download-artifact@v4
@@ -139,10 +147,11 @@ jobs:
           test -d "rootfs/lib/modules/$KREL/kernel"
           depmod -b rootfs "$KREL" 2>/dev/null || true
 
-          # boot-time config: SD card is the root device, serial console
+          # Root lives on userdata (mmcblk0p38) -- the standard MTK porting
+          # layout: no SD card timing issues, no extra partition to create.
           cat > rootfs/etc/fstab <<'FSTAB'
-          # TB-X606F mainline: root on microSD (mmcblk1p1), serial console
-          /dev/mmcblk1p1  /       ext4  defaults,noatime  0 1
+          # TB-X606F mainline: root on eMMC userdata (mmcblk0p38)
+          /dev/mmcblk0p38 /       ext4  defaults,noatime  0 1
           proc            /proc   proc  defaults          0 0
           sysfs           /sys    sysfs defaults          0 0
           devtmpfs        /dev    devtmpfs defaults       0 0
@@ -152,13 +161,65 @@ jobs:
           127.0.0.1 localhost tbx606
           ::1       localhost tbx606
           HOSTS
+
+          # The image is smaller than the real userdata partition; grow the
+          # filesystem on first boot so the whole partition becomes usable.
+          mkdir -p rootfs/usr/local/sbin rootfs/var/lib
+          cat > rootfs/usr/local/sbin/grow-rootfs.sh <<'GROW'
+          #!/bin/sh
+          # Grow the root filesystem to fill its whole partition (first boot).
+          set -e
+          SRC=$(findmnt -no SOURCE / 2>/dev/null || true)
+          [ -n "$SRC" ] || SRC=/dev/mmcblk0p38
+          echo "grow-rootfs: resizing $SRC"
+          resize2fs "$SRC" || echo "grow-rootfs: resize failed (non-fatal)"
+          mkdir -p /var/lib
+          touch /var/lib/grow-rootfs.done
+          GROW
+          chmod +x rootfs/usr/local/sbin/grow-rootfs.sh
+          mkdir -p rootfs/etc/systemd/system
+          cat > rootfs/etc/systemd/system/grow-rootfs.service <<'SVC'
+          [Unit]
+          Description=Grow rootfs to fill the partition
+          DefaultDependencies=no
+          After=local-fs.target
+          Before=sysinit.target
+          ConditionPathExists=!/var/lib/grow-rootfs.done
+
+          [Service]
+          Type=oneshot
+          RemainAfterExit=yes
+          ExecStart=/usr/local/sbin/grow-rootfs.sh
+
+          [Install]
+          WantedBy=sysinit.target
+          SVC
+          mkdir -p rootfs/etc/systemd/system/sysinit.target.wants
+          ln -sf /etc/systemd/system/grow-rootfs.service \
+                 rootfs/etc/systemd/system/sysinit.target.wants/grow-rootfs.service
+
           # serial getty on ttyS0 (POGO UART) for headless access
           mkdir -p rootfs/etc/systemd/system/getty.target.wants
-          ln -sf /lib/systemd/system/serial-getty@.service \
+          ln -sf /usr/lib/systemd/system/serial-getty@.service \
                  rootfs/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service
           # USB gadget serial also gets a getty
-          ln -sf /lib/systemd/system/serial-getty@.service \
+          ln -sf /usr/lib/systemd/system/serial-getty@.service \
                  rootfs/etc/systemd/system/getty.target.wants/serial-getty@ttyGS0.service
+
+          # ---- ext4 image, flashable straight to userdata ----
+          # 2 GiB is plenty for a base system; grow-rootfs takes the rest on
+          # the first boot. sudo is needed so mke2fs -d can preserve owners.
+          sudo mke2fs -t ext4 -F -q -d rootfs -b 4096 \
+                 -O ^metadata_csum_seed,has_journal,extent \
+                 -L tbx606-root rootfs.img 2048M
+          echo "[rootfs] raw ext4 image: $(wc -c < rootfs.img) bytes"
+          sudo e2fsck -fy rootfs.img || true
+          sudo resize2fs -M rootfs.img >/dev/null 2>&1 || true   # shrink to data size
+          echo "[rootfs] after shrink: $(wc -c < rootfs.img) bytes"
+
+          # Android sparse image: fastboot-native, holes cost nothing
+          img2simg rootfs.img rootfs-sparse.img
+          echo "[rootfs] sparse image: $(wc -c < rootfs-sparse.img) bytes"
 
           tar cJf tbx606-rootfs.tar.xz -C rootfs .
           echo "[rootfs] tbx606-rootfs.tar.xz: $(wc -c < tbx606-rootfs.tar.xz) bytes"
@@ -169,4 +230,7 @@ jobs:
           name: tbx606-rootfs
           retention-days: 30
           if-no-files-found: error
-          path: tbx606-rootfs.tar.xz
+          path: |
+            rootfs-sparse.img
+            rootfs.img
+            tbx606-rootfs.tar.xz
