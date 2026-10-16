@@ -34,7 +34,16 @@ def main():
     p.add_argument('--dtb', required=True)
     p.add_argument('--ramdisk', required=True, help='initramfs cpio(.gz)')
     p.add_argument('-o', '--output', required=True)
-    p.add_argument('--cmdline', default='bootopt=64S3,32N2,64N2 buildvariant=user')
+    # Keep the stock bootopt prefix (LK storage hint) AND our console args.
+    # Some MTK LK builds overwrite chosen/bootargs with the header cmdline;
+    # if we only shipped bootopt there we would lose console= entirely and a
+    # blind bring-up would have no log path. If LK *appends* instead, the
+    # duplicated args are harmless (each is registered; the parser takes the
+    # last one for /dev/console, and printk goes to all of them anyway).
+    p.add_argument('--cmdline',
+                   default='bootopt=64S3,32N2,64N2 buildvariant=user '
+                           'earlycon console=ttyS0,921600n1 console=ttyGS0 '
+                           'clk_ignore_unused regulator_ignore_unused')
     p.add_argument('--pagesize', type=int, default=PAGE_SIZE)
     a = p.parse_args()
 
