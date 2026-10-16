@@ -31,8 +31,8 @@ jobs:
         run: make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- tbx606_defconfig
 
       - name: Build Image.gz + DTB
-        run: make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-               Image.gz mt8768-lenovo-tbx606.dtb
+        run: |
+          make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-Image.gz mt8768-lenovo-tbx606.dtb
 
       - name: Build modules and pack tarball
         run: |
