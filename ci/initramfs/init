@@ -1,10 +1,13 @@
 #!/bin/sh
 # TB-X606F mainline initramfs /init
-# Goals:
-#   1. bring up a minimal userspace
-#   2. mount Debian rootfs from microSD (mmcblk1p1/p2) or eMMC (mmcblk0pNN)
-#   3. switch_root into it; if nothing found, emergency shell on
-#      ttyS0 (POGO UART) / ttyGS0 (USB gadget serial)
+#
+# Rootfs layout (standard MTK mainline porting):
+#   1. eMMC userdata  = /dev/mmcblk0p38   <- primary, flashed with the Debian
+#                                            ext4 image via fastboot
+#   2. microSD        = /dev/mmcblk1pN    <- fallback / alternative carrier
+#   3. anything else on eMMC that looks like a rootfs
+# If nothing matches: emergency shell on ttyS0 (POGO UART) / ttyGS0 (USB
+# gadget serial) so a blind bring-up still has a way to see what happened.
 
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -37,37 +40,53 @@ if [ -d /sys/fs/pstore ]; then
     }
 fi
 
+# usrmerge-aware: Debian trixie has sbin->usr/sbin and init under
+# /usr/lib/systemd/systemd, so checking only /sbin/init can be misleading
+# depending on how the rootfs was extracted.
+is_rootfs() {
+    local d="$1"
+    [ -d "$d/etc" ] || return 1
+    for c in /sbin/init /usr/sbin/init /usr/lib/systemd/systemd /lib/systemd/systemd; do
+        [ -e "$d$c" ] && return 0
+    done
+    return 1
+}
+
 ROOTDEV=""
 ROOTFS=""
+mkdir -p /mnt/rootfs
 
-# Preferred: microSD card partitions (eMMC had a driver quirk on the
-# sibling tbx306x port, so SD is the primary rootfs carrier).
-for dev in /dev/mmcblk1p1 /dev/mmcblk1p2 /dev/mmcblk1p3; do
-    [ -b "$dev" ] || continue
-    mkdir -p /mnt/rootfs
-    for fs in ext4 vfat; do
+try_mount() {
+    local dev="$1" cands="$2" fs
+    [ -b "$dev" ] || return 1
+    for fs in $cands; do
         if mount -t "$fs" -o rw "$dev" /mnt/rootfs 2>/dev/null; then
-            if [ -d /mnt/rootfs/etc ] && [ -e /mnt/rootfs/sbin/init -o -e /mnt/rootfs/lib/systemd/systemd ]; then
-                ROOTDEV="$dev"; ROOTFS="$fs"; break
+            if is_rootfs /mnt/rootfs; then
+                ROOTDEV="$dev"; ROOTFS="$fs"; return 0
             fi
-            umount "$dev" 2>/dev/null
+            echo "  $dev ($fs): mounted but no init, skipping"
+            umount /mnt/rootfs 2>/dev/null
         fi
     done
-    [ -n "$ROOTDEV" ] && break
-    umount /mnt/rootfs 2>/dev/null
-done
+    return 1
+}
 
-# Fallback: eMMC userdata-ish partition with a rootfs on it
+echo "Scanning for rootfs..."
+
+# 1) eMMC userdata -- primary target (fastboot flash userdata rootfs.img)
+try_mount /dev/mmcblk0p38 "ext4 ext2"
+
+# 2) microSD card -- fallback carrier
 if [ -z "$ROOTDEV" ]; then
-    for dev in /dev/mmcblk0p1 /dev/mmcblk0p38; do
-        [ -b "$dev" ] || continue
-        mkdir -p /mnt/rootfs
-        if mount -t ext4 -o rw "$dev" /mnt/rootfs 2>/dev/null; then
-            if [ -e /mnt/rootfs/sbin/init -o -e /mnt/rootfs/lib/systemd/systemd ]; then
-                ROOTDEV="$dev"; ROOTFS="ext4"; break
-            fi
-            umount "$dev" 2>/dev/null
-        fi
+    for p in 1 2 3; do
+        try_mount "/dev/mmcblk1p$p" "ext4 ext2 vfat" && break
+    done
+fi
+
+# 3) last resort: anything on eMMC that looks like a rootfs
+if [ -z "$ROOTDEV" ]; then
+    for p in 1 37 39 40; do
+        try_mount "/dev/mmcblk0p$p" "ext4 ext2" && break
     done
 fi
 
@@ -77,16 +96,20 @@ if [ -n "$ROOTDEV" ]; then
     mount -t proc     proc     /mnt/rootfs/proc
     mount -t sysfs    sysfs    /mnt/rootfs/sys
     mount -t devtmpfs devtmpfs /mnt/rootfs/dev
+    # keep the pstore record reachable from the real root as well
+    mkdir -p /mnt/rootfs/pstore 2>/dev/null
     exec switch_root /mnt/rootfs /sbin/init
 fi
 
 # ---- emergency shell (first boot lands here) ----
 echo "No rootfs found."
 echo "Emergency shell on console (ttyS0 / ttyGS0)."
+echo "Block devices seen:"
+ls /dev/mmcblk* /dev/sd* 2>/dev/null || echo "  (none!)"
 echo "Hints:"
-echo "  ls /dev/mmcblk*            # check SD/eMMC visibility"
-echo "  mount -t ext4 /dev/mmcblk1p1 /mnt && ls /mnt"
-echo "  i2cdetect -y -r 5          # scan i2c bus 5 (MT6370 etc.)"
+echo "  mount -t ext4 /dev/mmcblk0p38 /mnt && ls /mnt"
+echo "  i2cdetect -y -r 5          # scan i2c bus 5 (PMIC/subPMIC)"
+echo "  cat /proc/interrupts       # is anything alive?"
 echo ""
 exec setsid cttyhack sh
 exit 0
