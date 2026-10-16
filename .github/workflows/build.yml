@@ -104,7 +104,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq e2fsprogs android-sdk-libsparse-utils
-          mke2fs -V 2>&1 | head -1
+          mke2fs -V 2>&1 | head -1 || true
           img2simg -v 2>&1 | head -1 || true
 
       - name: Download kernel modules artifact
@@ -140,9 +140,17 @@ jobs:
           tar xJf rootfs.tar.xz -C rootfs
 
           # modules.tar.gz contains ./lib/modules/<KREL>/... (tarred from
-          # the modules_install root), so extract it straight into rootfs/
-          KREL=$(tar tzf artifacts/modules.tar.gz | grep -m1 -oE '\./lib/modules/[^/]+' | cut -d/ -f4)
+          # the modules_install root), so extract it straight into rootfs/.
+          # Capture the full listing first: piping `tar t` into a consumer
+          # that exits early (grep -m1 / head -1) closes the pipe and tar
+          # dies with "stdout: write error", which pipefail turns into a
+          # hard step failure.
+          MODLIST=$(tar tzf artifacts/modules.tar.gz)
+          KREL=$(printf '%s\n' "$MODLIST" \
+                 | grep -oE 'lib/modules/[^/]+' | sort -u \
+                 | awk -F/ 'NR==1{print $3}')
           echo "[rootfs] kernel release: $KREL"
+          test -n "$KREL" || { echo "[rootfs] could not determine KREL"; exit 1; }
           tar xzf artifacts/modules.tar.gz -C rootfs
           test -d "rootfs/lib/modules/$KREL/kernel"
           depmod -b rootfs "$KREL" 2>/dev/null || true
