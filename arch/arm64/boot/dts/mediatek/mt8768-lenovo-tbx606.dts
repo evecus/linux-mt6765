@@ -41,7 +41,7 @@
 		/* console=ttyGS0 = USB gadget serial: headless access without UART
 		 * hardware. ttyS0 = POGO UART0 (works when a USB-TTL is attached).
 		 * clk/regulator_ignore_unused: safety net while the port is WIP. */
-		bootargs = "earlycon console=ttyS0,921600n1 console=ttyGS0 clk_ignore_unused regulator_ignore_unused";
+		bootargs = "earlycon console=ttyS0,921600n1 console=ttyGS0 clk_ignore_unused regulator_ignore_unused loglevel=7";
 		stdout-path = "serial0:921600n8";
 	};
 
@@ -56,11 +56,25 @@
 		ranges;
 
 		/* Survives panic + MTK WDT reboot; readable via /sys/fs/pstore
-		 * after the next successful boot. Vendor reserved-memory uses
-		 * dynamic alloc-ranges, so this fixed region does not collide. */
-		ramoops@47c80000 {
+		 * after the next successful boot.
+		 *
+		 * Address note (measured from the vendor kernel's /proc/iomem):
+		 *   40000000-47c7ffff : System RAM
+		 *   47dd0000-6fffffff : System RAM      <-- this one
+		 *   76000000-77feffff : System RAM
+		 *   ...
+		 *   47c80000 is *inside the hole* between the first two banks
+		 *   (it is not RAM at all). ramoops registers at postcore_initcall
+		 *   and immediately ioremaps + reads its region, so pointing it at
+		 *   a hole made the kernel take a synchronous abort before the
+		 *   console or USB gadget ever came up -- which is exactly what we
+		 *   saw: no USB enumeration at all, and no pstore record left
+		 *   behind. 0x6f000000 sits in a large contiguous bank, far from
+		 *   the kernel (0x40080000), dtb (0x47880000) and ramdisk
+		 *   (0x51b00000), and exists on every MT6765 memory configuration. */
+		ramoops@6f000000 {
 			compatible = "ramoops";
-			reg = <0 0x47c80000 0 0x100000>;
+			reg = <0 0x6f000000 0 0x100000>;
 			record-size = <0x20000>;
 			console-size = <0x40000>;
 			ftrace-size = <0x20000>;
