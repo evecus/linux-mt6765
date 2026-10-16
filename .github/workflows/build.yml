@@ -95,6 +95,7 @@ jobs:
   rootfs:
     name: Debian rootfs for SD card
     runs-on: ubuntu-24.04
+    needs: kernel
     steps:
       - uses: actions/checkout@v4
 
