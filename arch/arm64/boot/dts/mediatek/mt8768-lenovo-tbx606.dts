@@ -1,0 +1,322 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Device Tree Source for Lenovo Tab M10 FHD Plus (2nd Gen)
+ * TB-X606F / TB-X606X / TB-X606V  (MediaTek MT8768, a.k.a. MT6765 family)
+ *
+ * Board: achilles6_row_wifi
+ *   - 4GB LPDDR4X @ 0x40000000
+ *   - 64GB eMMC 5.1 (MSDC0) + microSD (MSDC1, CD on GPIO1)
+ *   - 10.3" 1920x1200 DSI panel (BOE TV103WUM-LL1) + FTS touch  [v1: disabled]
+ *   - UART0 on GPIO95/96 (POGO TX/RX, 1.8V)
+ *   - MT6357 PMIC (pwrap), bq25601 charger, MT6370 sub-PMIC
+ *   - MT6631 connsys WiFi/BT  [not ported in mainline]
+ *
+ * v1 scope: console (UART + USB gadget serial), SD card rootfs, eMMC,
+ * USB peripheral networking, pstore/ramoops for panic log survival.
+ */
+
+/dts-v1/;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/pinctrl/mediatek,mt6765-pinfunc.h>
+
+#include "mt6765.dtsi"
+#include "mt6357.dtsi"
+
+/ {
+	model = "Lenovo Tab M10 FHD Plus (TB-X606F)";
+	compatible = "lenovo,tbx606", "mediatek,mt8768", "mediatek,mt6765";
+	chassis-type = "tablet";
+
+	aliases {
+		mmc0 = &mmc0;
+		mmc1 = &mmc1;
+		serial0 = &uart0;
+	};
+
+	chosen {
+		/* console=ttyGS0 = USB gadget serial: headless access without UART
+		 * hardware. ttyS0 = POGO UART0 (works when a USB-TTL is attached).
+		 * clk/regulator_ignore_unused: safety net while the port is WIP. */
+		bootargs = "earlycon console=ttyS0,921600n1 console=ttyGS0 clk_ignore_unused regulator_ignore_unused";
+		stdout-path = "serial0:921600n8";
+	};
+
+	memory@40000000 {
+		device_type = "memory";
+		reg = <0 0x40000000 0 0xF0000000>; /* 1GB hole + 3.75GB = 4GB device */
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		/* Survives panic + MTK WDT reboot; readable via /sys/fs/pstore
+		 * after the next successful boot. Vendor reserved-memory uses
+		 * dynamic alloc-ranges, so this fixed region does not collide. */
+		ramoops@47c80000 {
+			compatible = "ramoops";
+			reg = <0 0x47c80000 0 0x100000>;
+			record-size = <0x20000>;
+			console-size = <0x40000>;
+			ftrace-size = <0x20000>;
+			pmsg-size = <0x20000>;
+		};
+	};
+
+	/* Stock bootloader (LK) walks the DT and expects these nodes to exist.
+	 * Mirrors the mt6765-nokia-roo.dts bring-up findings. */
+	scp@10500000 {
+		compatible = "mediatek,scp";
+	};
+
+	gpio@10005000 {
+		linux,phandle = <0xdead>;
+		phandle = <0xdead>;
+	};
+
+	__symbols__ {
+		gpio = "/gpio@10005000";
+	};
+};
+
+&cpu0 {
+	clock-frequency = <2300000000>;
+	proc-supply = <&mt6357_vproc_reg>;
+	sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&cpu1 {
+	clock-frequency = <2300000000>;
+	proc-supply = <&mt6357_vproc_reg>;
+	sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&cpu2 {
+	clock-frequency = <2300000000>;
+	proc-supply = <&mt6357_vproc_reg>;
+	sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&cpu3 {
+	clock-frequency = <2300000000>;
+	proc-supply = <&mt6357_vproc_reg>;
+	sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&cpu4 {
+	clock-frequency = <1800000000>;
+	proc-supply = <&mt6357_vproc_reg>;
+	sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&cpu5 {
+	clock-frequency = <1800000000>;
+	proc-supply = <&mt6357_vproc_reg>;
+	sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&cpu6 {
+	clock-frequency = <1800000000>;
+	proc-supply = <&mt6357_vproc_reg>;
+	sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&cpu7 {
+	clock-frequency = <1800000000>;
+	proc-supply = <&mt6357_vproc_reg>;
+	sram-supply = <&mt6357_vsram_proc_reg>;
+};
+
+&pwrap {
+	status = "okay";
+};
+
+&mt6357_vdram_reg {
+	regulator-always-on;
+};
+
+&uart0 {
+	status = "okay";
+
+	pinctrl-0 = <&uart0_pins>;
+	pinctrl-names = "default";
+};
+
+&i2c5 {
+	/* i2c5 = GPIO48/49; bus enabled for device discovery (i2cdetect).
+	 * MT6370 sub-PMIC (flash/PD) is expected here, added after scan. */
+	status = "okay";
+
+	pinctrl-0 = <&i2c5_pins>;
+	pinctrl-names = "default";
+};
+
+&mmc0 {
+	/* eMMC (boot media). Not required for SD-card-rootfs boots, but
+	 * enabled early: it is the fallback rootfs carrier. */
+	status = "okay";
+
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc0_pins_default>;
+	pinctrl-1 = <&mmc0_pins_uhs>;
+
+	max-frequency = <200000000>;
+	non-removable;
+	vmmc-supply = <&mt6357_vemc_reg>;
+	vqmmc-supply = <&mt6357_vio18_reg>;
+
+	hs400-ds-delay = <0x12814>;
+};
+
+&mmc1 {
+	/* microSD: primary rootfs carrier (tbx306x on the same SoC family
+	 * boots from SD reliably; eMMC had a driver quirk there). */
+	status = "okay";
+
+	pinctrl-names = "default", "state_uhs";
+	pinctrl-0 = <&mmc1_default_pins>;
+	pinctrl-1 = <&mmc1_default_pins>;
+
+	bus-width = <4>;
+	cap-sd-highspeed;
+	sd-uhs-sdr12;
+	sd-uhs-sdr25;
+	sd-uhs-sdr50;
+	sd-uhs-ddr50;
+	sd-uhs-sdr104;
+	no-mmc;
+	no-sdio;
+	cd-gpios = <&pio 1 0>; /* vendor DT: cd-gpios = pio 1 */
+	max-frequency = <200000000>;
+	vmmc-supply = <&mt6357_vmch_reg>;
+	vqmmc-supply = <&mt6357_vmc_reg>;
+};
+
+&usb2 {
+	status = "okay";
+
+	dr_mode = "peripheral"; /* ttyGS0 serial + RNDIS/ECM gadget toward the PC */
+	maximum-speed = "high-speed";
+};
+
+&u2phy {
+	status = "okay";
+};
+
+&pio {
+	gpio_keys: gpio-keys-pins {
+		pins {
+			pinmux = <PINMUX_GPIO93__FUNC_KPCOL0>;
+			bias-pull-up;
+			input-enable;
+		};
+	};
+
+	i2c5_pins: i2c5-pins {
+		pins-bus {
+			pinmux = <PINMUX_GPIO48__FUNC_SCL5>,
+				 <PINMUX_GPIO49__FUNC_SDA5>;
+			bias-disable;
+		};
+	};
+
+	mmc0_pins_default: mmc0-pins-default {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO129__FUNC_MSDC0_DAT0>,
+				 <PINMUX_GPIO127__FUNC_MSDC0_DAT1>,
+				 <PINMUX_GPIO126__FUNC_MSDC0_DAT2>,
+				 <PINMUX_GPIO132__FUNC_AUX1_MSDC0_DAT3>,
+				 <PINMUX_GPIO123__FUNC_MSDC0_DAT4>,
+				 <PINMUX_GPIO125__FUNC_MSDC0_DAT5>,
+				 <PINMUX_GPIO128__FUNC_MSDC0_DAT6>,
+				 <PINMUX_GPIO130__FUNC_AUX2_MSDC0_DAT7>,
+				 <PINMUX_GPIO122__FUNC_AUX2_MSDC0_CMD>;
+			input-enable;
+			drive-strength = <3>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+		};
+
+		pins_clk {
+			pinmux = <PINMUX_GPIO124__FUNC_AUX2_MSDC0_CLK>;
+			drive-strength = <3>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins_rst {
+			pinmux = <PINMUX_GPIO133__FUNC_AUX2_MSDC0_RSTB>;
+			drive-strength = <3>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_01>;
+		};
+	};
+
+	mmc0_pins_uhs: mmc0-pins-uhs {
+		pins_cmd_dat {
+			pinmux = <PINMUX_GPIO129__FUNC_MSDC0_DAT0>,
+				 <PINMUX_GPIO127__FUNC_MSDC0_DAT1>,
+				 <PINMUX_GPIO126__FUNC_MSDC0_DAT2>,
+				 <PINMUX_GPIO132__FUNC_AUX1_MSDC0_DAT3>,
+				 <PINMUX_GPIO123__FUNC_MSDC0_DAT4>,
+				 <PINMUX_GPIO125__FUNC_MSDC0_DAT5>,
+				 <PINMUX_GPIO128__FUNC_MSDC0_DAT6>,
+				 <PINMUX_GPIO130__FUNC_AUX2_MSDC0_DAT7>,
+				 <PINMUX_GPIO122__FUNC_AUX2_MSDC0_CMD>;
+			input-enable;
+			drive-strength = <4>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+		};
+
+		pins_clk {
+			pinmux = <PINMUX_GPIO124__FUNC_AUX2_MSDC0_CLK>;
+			drive-strength = <4>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins_ds {
+			pinmux = <PINMUX_GPIO131__FUNC_AUX2_MSDC0_DSL>;
+			drive-strength = <4>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins_rst {
+			pinmux = <PINMUX_GPIO133__FUNC_AUX2_MSDC0_RSTB>;
+			drive-strength = <3>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_01>;
+		};
+	};
+
+	mmc1_default_pins: mmc1-default-pins {
+		pins-cmd-dat {
+			pinmux = <PINMUX_GPIO32__FUNC_MSDC1_DAT0>,
+				 <PINMUX_GPIO34__FUNC_MSDC1_DAT1>,
+				 <PINMUX_GPIO33__FUNC_MSDC1_DAT2>,
+				 <PINMUX_GPIO31__FUNC_MSDC1_DAT3>,
+				 <PINMUX_GPIO30__FUNC_MSDC1_CMD>;
+			input-enable;
+			drive-strength = <3>;
+			bias-pull-up = <MTK_PUPD_SET_R1R0_01>;
+		};
+
+		pins-clk {
+			pinmux = <PINMUX_GPIO29__FUNC_MSDC1_CLK>;
+			drive-strength = <3>;
+			bias-pull-down = <MTK_PUPD_SET_R1R0_10>;
+		};
+
+		pins-insert {
+			pinmux = <PINMUX_GPIO1__FUNC_GPIO1>;
+			bias-pull-up;
+		};
+	};
+
+	uart0_pins: uart0-pins {
+		pins {
+			pinmux = <PINMUX_GPIO95__FUNC_URXD0>,
+					 <PINMUX_GPIO96__FUNC_UTXD0>;
+		};
+	};
+};

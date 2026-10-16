@@ -1,0 +1,92 @@
+#!/bin/sh
+# TB-X606F mainline initramfs /init
+# Goals:
+#   1. bring up a minimal userspace
+#   2. mount Debian rootfs from microSD (mmcblk1p1/p2) or eMMC (mmcblk0pNN)
+#   3. switch_root into it; if nothing found, emergency shell on
+#      ttyS0 (POGO UART) / ttyGS0 (USB gadget serial)
+
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+mount -t proc     proc     /proc
+mount -t sysfs    sysfs    /sys
+mount -t devtmpfs devtmpfs /dev 2>/dev/null
+mkdir -p /run /var/log
+
+echo "=========================================="
+echo " TB-X606F mainline initramfs"
+echo " kernel: $(uname -r)"
+echo "=========================================="
+
+# Load any modules shipped in the initramfs (kernel is mostly built-in).
+if [ -d /lib/modules ]; then
+    for f in /lib/modules/*/modules.dep; do
+        [ -e "$f" ] && break
+        depmod -a "$(dirname "$(dirname "$f")")" 2>/dev/null
+    done
+fi
+
+# pstore: surface logs from a previous panic (blind-debug path)
+if [ -d /sys/fs/pstore ]; then
+    mkdir -p /pstore
+    mount -t pstore pstore /pstore 2>/dev/null && {
+        echo "--- pstore records from previous boot ---"
+        ls -la /pstore
+        cat /pstore/dmesg-ramoops-0 2>/dev/null | tail -100
+        echo "--- end pstore ---"
+    }
+fi
+
+ROOTDEV=""
+ROOTFS=""
+
+# Preferred: microSD card partitions (eMMC had a driver quirk on the
+# sibling tbx306x port, so SD is the primary rootfs carrier).
+for dev in /dev/mmcblk1p1 /dev/mmcblk1p2 /dev/mmcblk1p3; do
+    [ -b "$dev" ] || continue
+    mkdir -p /mnt/rootfs
+    for fs in ext4 vfat; do
+        if mount -t "$fs" -o rw "$dev" /mnt/rootfs 2>/dev/null; then
+            if [ -d /mnt/rootfs/etc ] && [ -e /mnt/rootfs/sbin/init -o -e /mnt/rootfs/lib/systemd/systemd ]; then
+                ROOTDEV="$dev"; ROOTFS="$fs"; break
+            fi
+            umount "$dev" 2>/dev/null
+        fi
+    done
+    [ -n "$ROOTDEV" ] && break
+    umount /mnt/rootfs 2>/dev/null
+done
+
+# Fallback: eMMC userdata-ish partition with a rootfs on it
+if [ -z "$ROOTDEV" ]; then
+    for dev in /dev/mmcblk0p1 /dev/mmcblk0p38; do
+        [ -b "$dev" ] || continue
+        mkdir -p /mnt/rootfs
+        if mount -t ext4 -o rw "$dev" /mnt/rootfs 2>/dev/null; then
+            if [ -e /mnt/rootfs/sbin/init -o -e /mnt/rootfs/lib/systemd/systemd ]; then
+                ROOTDEV="$dev"; ROOTFS="ext4"; break
+            fi
+            umount "$dev" 2>/dev/null
+        fi
+    done
+fi
+
+if [ -n "$ROOTDEV" ]; then
+    echo "rootfs: $ROOTDEV ($ROOTFS) -> switch_root"
+    mkdir -p /mnt/rootfs/proc /mnt/rootfs/sys /mnt/rootfs/dev /mnt/rootfs/run
+    mount -t proc     proc     /mnt/rootfs/proc
+    mount -t sysfs    sysfs    /mnt/rootfs/sys
+    mount -t devtmpfs devtmpfs /mnt/rootfs/dev
+    exec switch_root /mnt/rootfs /sbin/init
+fi
+
+# ---- emergency shell (first boot lands here) ----
+echo "No rootfs found."
+echo "Emergency shell on console (ttyS0 / ttyGS0)."
+echo "Hints:"
+echo "  ls /dev/mmcblk*            # check SD/eMMC visibility"
+echo "  mount -t ext4 /dev/mmcblk1p1 /mnt && ls /mnt"
+echo "  i2cdetect -y -r 5          # scan i2c bus 5 (MT6370 etc.)"
+echo ""
+exec setsid cttyhack sh
+exit 0

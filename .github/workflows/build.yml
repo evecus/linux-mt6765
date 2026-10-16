@@ -1,0 +1,157 @@
+name: tbx606-kernel
+
+# Build the TB-X606F (Lenovo Tab M10 FHD Plus 2nd Gen, MT8768) mainline
+# kernel + boot.img + Debian rootfs on GitHub's native Linux runners.
+#
+# Triggers: push to this branch, or manual dispatch from the Actions tab.
+
+on:
+  push:
+    branches: [mt6765-devel]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    name: kernel + boot.img
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            flex bison bc libssl-dev libelf-dev cpio device-tree-compiler \
+            gcc-aarch64-linux-gnu python3
+
+      - name: Configure (tbx606_defconfig)
+        run: make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- tbx606_defconfig
+
+      - name: Build Image.gz + DTB
+        run: make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+               Image.gz mt8768-lenovo-tbx606.dtb
+
+      - name: Build modules and pack tarball
+        run: |
+          make -j"$(nproc)" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- modules
+          rm -rf /tmp/mods && mkdir -p /tmp/mods
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+               INSTALL_MOD_PATH=/tmp/mods modules_install
+          tar czf modules.tar.gz -C /tmp/mods .
+          echo "[modules] $(tar tzf modules.tar.gz | wc -l) entries"
+
+      - name: Build initramfs (Alpine + /init)
+        run: bash ci/build_initramfs.sh initramfs.cpio.gz
+
+      - name: Pack boot.img (MTK layout)
+        run: |
+          python3 ci/mkbootimg_mtk.py \
+            --kernel arch/arm64/boot/Image.gz \
+            --dtb arch/arm64/boot/dts/mediatek/mt8768-lenovo-tbx606.dtb \
+            --ramdisk initramfs.cpio.gz \
+            -o boot.img
+
+      - name: Sanity-check boot.img structure
+        run: |
+          python3 - <<'EOF'
+          import struct, sys
+          d = open('boot.img','rb').read()
+          assert d[:8] == b'ANDROID!', 'bad magic'
+          ks, ka, rs, ra, ss, sa, ta, ps, hv = struct.unpack('<9I', d[8:44])
+          print(f'boot.img: kernel_size={ks} ramdisk_size={rs} page={ps} hdr_v={hv}')
+          assert ps == 2048, 'page size must be 2048 (MTK LK)'
+          assert hv == 2, 'header version must be 2'
+          assert ka == 0x40080000, 'kernel addr must match stock'
+          m = d.rfind(b'\xd0\x0d\xfe\xed', 2048, 2048 + ks)
+          assert m > 0, 'no FDT magic found in kernel area (DTB not appended?)'
+          totalsize = struct.unpack('>I', d[m+4:m+8])[0]
+          print(f'DTB at kernel-area offset {m-2048}, totalsize={totalsize}')
+          assert m + totalsize == 2048 + ks, 'DTB must end exactly at kernel area end'
+          print('BOOT.IMG STRUCTURE OK')
+          EOF
+          ls -la boot.img arch/arm64/boot/Image.gz \
+                arch/arm64/boot/dts/mediatek/mt8768-lenovo-tbx606.dtb
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tbx606-kernel
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            boot.img
+            arch/arm64/boot/Image.gz
+            arch/arm64/boot/dts/mediatek/mt8768-lenovo-tbx606.dtb
+            modules.tar.gz
+            initramfs.cpio.gz
+
+  rootfs:
+    name: Debian rootfs for SD card
+    runs-on: ubuntu-24.04
+    needs: kernel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download kernel modules artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tbx606-kernel
+          path: artifacts
+
+      - name: Fetch Debian trixie arm64 rootfs (LXC image)
+        run: |
+          BASE="https://images.linuxcontainers.org/images/debian/trixie/arm64/default"
+          LATEST=$(curl -s "$BASE/" | grep -oE 'href="[0-9]{8}_[0-9:]+/"' \
+                   | tr -d 'href="/' | sort | tail -1)
+          echo "[rootfs] latest LXC image: $LATEST"
+          curl -fsSL -o rootfs.tar.xz "$BASE/$LATEST/rootfs.tar.xz"
+          ls -la rootfs.tar.xz
+
+      - name: Assemble rootfs (modules + basic config)
+        run: |
+          set -euo pipefail
+          rm -rf rootfs && mkdir rootfs
+          tar xJf rootfs.tar.xz -C rootfs
+
+          # modules.tar.gz contains ./lib/modules/<KREL>/... (tarred from
+          # the modules_install root), so extract it straight into rootfs/
+          KREL=$(tar tzf artifacts/modules.tar.gz | grep -m1 -oE '\./lib/modules/[^/]+' | cut -d/ -f4)
+          echo "[rootfs] kernel release: $KREL"
+          tar xzf artifacts/modules.tar.gz -C rootfs
+          test -d "rootfs/lib/modules/$KREL/kernel"
+          depmod -b rootfs "$KREL" 2>/dev/null || true
+
+          # boot-time config: SD card is the root device, serial console
+          cat > rootfs/etc/fstab <<'FSTAB'
+          # TB-X606F mainline: root on microSD (mmcblk1p1), serial console
+          /dev/mmcblk1p1  /       ext4  defaults,noatime  0 1
+          proc            /proc   proc  defaults          0 0
+          sysfs           /sys    sysfs defaults          0 0
+          devtmpfs        /dev    devtmpfs defaults       0 0
+          FSTAB
+          echo "tbx606" > rootfs/etc/hostname
+          cat > rootfs/etc/hosts <<'HOSTS'
+          127.0.0.1 localhost tbx606
+          ::1       localhost tbx606
+          HOSTS
+          # serial getty on ttyS0 (POGO UART) for headless access
+          mkdir -p rootfs/etc/systemd/system/getty.target.wants
+          ln -sf /lib/systemd/system/serial-getty@.service \
+                 rootfs/etc/systemd/system/getty.target.wants/serial-getty@ttyS0.service
+          # USB gadget serial also gets a getty
+          ln -sf /lib/systemd/system/serial-getty@.service \
+                 rootfs/etc/systemd/system/getty.target.wants/serial-getty@ttyGS0.service
+
+          tar cJf tbx606-rootfs.tar.xz -C rootfs .
+          echo "[rootfs] tbx606-rootfs.tar.xz: $(wc -c < tbx606-rootfs.tar.xz) bytes"
+
+      - name: Upload rootfs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tbx606-rootfs
+          retention-days: 30
+          if-no-files-found: error
+          path: tbx606-rootfs.tar.xz

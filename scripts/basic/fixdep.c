@@ -285,21 +285,25 @@ static void parse_dep_file(char *p, const char *target)
 				p++;
 			}
 			continue;
-		case ' ':
-		case '\t':
-			/* skip whitespaces */
-			p++;
+	case ' ':
+	case '\t':
+	case '\r':
+		/* skip whitespaces (incl. CR from CRLF line endings) */
+		p++;
+		continue;
+	case '\\':
+		/*
+		 * backslash/newline combinations continue the
+		 * statement. Skip it just like a whitespace.
+		 * Also tolerate CRLF line endings produced by
+		 * Windows host compilers (MinGW gcc -MD).
+		 */
+		if (*(p + 1) == '\n' ||
+		    (*(p + 1) == '\r' && *(p + 2) == '\n')) {
+			p += (*(p + 1) == '\r') ? 3 : 2;
 			continue;
-		case '\\':
-			/*
-			 * backslash/newline combinations continue the
-			 * statement. Skip it just like a whitespace.
-			 */
-			if (*(p + 1) == '\n') {
-				p += 2;
-				continue;
-			}
-			break;
+		}
+		break;
 		case '\n':
 			/*
 			 * Makefiles use a line-based syntax, where the newline
@@ -320,16 +324,19 @@ static void parse_dep_file(char *p, const char *target)
 			continue;
 		}
 
-		/* find the end of the token */
-		q = p;
-		while (*q != ' ' && *q != '\t' && *q != '\n' && *q != '#' && *q != ':') {
-			if (*q == '\\') {
-				/*
-				 * backslash/newline combinations work like as
-				 * a whitespace, so this is the end of token.
-				 */
-				if (*(q + 1) == '\n')
-					break;
+	/* find the end of the token */
+	q = p;
+	while (*q != ' ' && *q != '\t' && *q != '\n' && *q != '\r' &&
+	       *q != '#' && *q != ':') {
+		if (*q == '\\') {
+			/*
+			 * backslash/newline combinations work like as
+			 * a whitespace, so this is the end of token.
+			 * Tolerate CRLF (Windows host compilers).
+			 */
+			if (*(q + 1) == '\n' ||
+			    (*(q + 1) == '\r' && *(q + 2) == '\n'))
+				break;
 
 				/* escaped special characters */
 				if (*(q + 1) == '#' || *(q + 1) == ':') {

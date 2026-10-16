@@ -3,7 +3,9 @@
  * Copyright (C) 2002 Roman Zippel <zippel@linux-m68k.org>
  */
 
+#ifndef _WIN32
 #include <sys/mman.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <ctype.h>
@@ -48,7 +50,6 @@ static bool is_same(const char *file1, const char *file2)
 {
 	int fd1, fd2;
 	struct stat st1, st2;
-	void *map1, *map2;
 	bool ret = false;
 
 	fd1 = open(file1, O_RDONLY);
@@ -69,18 +70,59 @@ static bool is_same(const char *file1, const char *file2)
 	if (st1.st_size != st2.st_size)
 		goto close2;
 
-	map1 = mmap(NULL, st1.st_size, PROT_READ, MAP_PRIVATE, fd1, 0);
-	if (map1 == MAP_FAILED)
-		goto close2;
+#ifdef _WIN32
+	/*
+	 * Windows host builds have no mmap(); compare the files by
+	 * reading them in chunks instead.
+	 */
+	{
+		char buf1[4096], buf2[4096];
+		int n1, n2;
+		bool same = true;
 
-	map2 = mmap(NULL, st2.st_size, PROT_READ, MAP_PRIVATE, fd2, 0);
-	if (map2 == MAP_FAILED)
-		goto close2;
+		for (;;) {
+			n1 = read(fd1, buf1, sizeof(buf1));
+			n2 = read(fd2, buf2, sizeof(buf2));
+			if (n1 != n2) {
+				same = false;
+				break;
+			}
+			if (n1 <= 0)
+				break;
+			if (memcmp(buf1, buf2, n1)) {
+				same = false;
+				break;
+			}
+		}
 
-	if (memcmp(map1, map2, st1.st_size))
-		goto close2;
+		if (same)
+			ret = true;
+		else
+			ret = false;
+	}
+#else
+	{
+		void *map1, *map2;
 
-	ret = true;
+		map1 = mmap(NULL, st1.st_size, PROT_READ, MAP_PRIVATE, fd1, 0);
+		if (map1 == MAP_FAILED)
+			goto close2;
+
+		map2 = mmap(NULL, st2.st_size, PROT_READ, MAP_PRIVATE, fd2, 0);
+		if (map2 == MAP_FAILED) {
+			munmap(map1, st1.st_size);
+			goto close2;
+		}
+
+		if (memcmp(map1, map2, st1.st_size))
+			goto unmap;
+
+		ret = true;
+unmap:
+		munmap(map1, st1.st_size);
+		munmap(map2, st2.st_size);
+	}
+#endif
 close2:
 	close(fd2);
 close1:

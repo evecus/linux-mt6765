@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""Pack an Android boot.img (header v2, MTK layout) from scratch.
+
+Replicates the stock TB-X606F boot.img byte structure exactly:
+  - page_size 2048, header_version 2, boot_header_size 1660 (MTK extends
+    the AOSP v2 header by 12 bytes)
+  - kernel area = Image(.gz) + DTB concatenated, no padding between
+    (MTK LK splits them by scanning for the FDT magic)
+  - MTK private header field @1648 = dtb_size + 64 (mirrors stock)
+  - base addresses from stock: kernel 0x40080000, ramdisk 0x51b00000,
+    second 0x40f00000, tags 0x47880000
+  - cmdline keeps the stock bootopt prefix (LK storage hint)
+
+Works on any host with python3 (no AOSP mkbootimg needed).
+"""
+import struct, sys
+
+KERNEL_ADDR  = 0x40080000
+RAMDISK_ADDR = 0x51b00000
+SECOND_ADDR  = 0x40f00000
+TAGS_ADDR    = 0x47880000
+PAGE_SIZE    = 2048
+OS_VERSION   = 0x1400015b   # stock value; meaningless for boot
+HDR_SIZE     = 1660         # stock boot_header_size
+
+def pad(data, page):
+    r = len(data) % page
+    return data + b'\0' * (page - r) if r else data
+
+def main():
+    import argparse
+    p = argparse.ArgumentParser()
+    p.add_argument('--kernel', required=True, help='Image or Image.gz')
+    p.add_argument('--dtb', required=True)
+    p.add_argument('--ramdisk', required=True, help='initramfs cpio(.gz)')
+    p.add_argument('-o', '--output', required=True)
+    p.add_argument('--cmdline', default='bootopt=64S3,32N2,64N2 buildvariant=user')
+    p.add_argument('--pagesize', type=int, default=PAGE_SIZE)
+    a = p.parse_args()
+
+    with open(a.kernel, 'rb') as f:
+        kernel_img = f.read()
+    with open(a.dtb, 'rb') as f:
+        dtb = f.read()
+    with open(a.ramdisk, 'rb') as f:
+        ramdisk = f.read()
+
+    # sanity: kernel magic
+    if kernel_img[:2] != b'\x1f\x8b' and kernel_img[:4] != b'\x00\x00\xa0\xe1' \
+       and kernel_img[0x38:0x3c] != b'ARM\x64':
+        print(f"[pack] WARNING: unrecognized kernel image magic: {kernel_img[:8].hex()}",
+              file=sys.stderr)
+    if dtb[:4] != b'\xd0\x0d\xfe\xed':
+        sys.exit(f"[pack] ERROR: {a.dtb} is not a DTB (bad FDT magic)")
+
+    page = a.pagesize
+    kernel_blob = kernel_img + dtb
+
+    hdr = bytearray(2048)
+    hdr[0:8] = b'ANDROID!'
+    struct.pack_into('<9I', hdr, 8, len(kernel_blob), KERNEL_ADDR,
+                     len(ramdisk), RAMDISK_ADDR, 0, SECOND_ADDR, TAGS_ADDR,
+                     page, 2)
+    struct.pack_into('<I', hdr, 44, OS_VERSION)
+    cmdline = a.cmdline.encode()
+    assert len(cmdline) < 512
+    hdr[64:64+len(cmdline)] = cmdline
+    hdr[576:608] = b'\0' * 32                      # id: zeroed
+    struct.pack_into('<I', hdr, 1632, 0)           # recovery_dtbo_offset
+    struct.pack_into('<Q', hdr, 1636, 0)           # recovery_dtbo_size
+    struct.pack_into('<I', hdr, 1644, HDR_SIZE)    # boot_header_size
+    struct.pack_into('<I', hdr, 1648, len(dtb) + 64)  # MTK: dtb_size + 64
+    struct.pack_into('<I', hdr, 1652, TAGS_ADDR)      # MTK: tags_addr again
+    struct.pack_into('<I', hdr, 1656, 0)
+
+    out = bytes(hdr) + pad(kernel_blob, page) + pad(ramdisk, page)
+    with open(a.output, 'wb') as f:
+        f.write(out)
+    print(f"[pack] {a.output}: {len(out)} bytes "
+          f"(kernel={len(kernel_blob)} [Image {len(kernel_img)} + dtb {len(dtb)}], "
+          f"ramdisk={len(ramdisk)}, page={page})")
+    print(f"[pack] cmdline: {cmdline.decode()}")
+
+if __name__ == '__main__':
+    main()
